@@ -9,6 +9,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strconv"
+	"time"
 
 	"github.com/sirupsen/logrus"
 	"github.com/skevetter/devpod/cmd/flags"
@@ -334,6 +335,30 @@ func (w *workspaceInitializer) initialize() error {
 	}
 
 	w.tryConfigureDockerDaemon()
+
+	debugSleep := getWorkspaceEnv(w.workspaceInfo.CLIOptions.WorkspaceEnv, "DEVPOD_DEBUG_SLEEP")
+	if debugSleep != "" {
+		sleepSeconds := 300
+		if v, err := strconv.Atoi(debugSleep); err == nil && v > 0 {
+			sleepSeconds = v
+		}
+		w.logger.Infof("DEVPOD_DEBUG_SLEEP=%d — pausing before build. Docker credentials are configured. SSM into the instance to debug.", sleepSeconds)
+		w.logger.Infof("DOCKER_CONFIG=%s", os.Getenv("DOCKER_CONFIG"))
+		for i := sleepSeconds; i > 0; i -= 30 {
+			w.logger.Infof("Debug sleep: %d seconds remaining...", i)
+			sleepDuration := 30
+			if i < 30 {
+				sleepDuration = i
+			}
+			select {
+			case <-w.ctx.Done():
+				return w.ctx.Err()
+			case <-timeAfter(sleepDuration):
+			}
+		}
+		w.logger.Infof("Debug sleep complete, proceeding with build.")
+	}
+
 	return nil
 }
 
@@ -851,4 +876,18 @@ func reloadDockerDaemon(ctx context.Context) error {
 		return err
 	}
 	return nil
+}
+
+func timeAfter(seconds int) <-chan time.Time {
+	return time.After(time.Duration(seconds) * time.Second)
+}
+
+func getWorkspaceEnv(envs []string, key string) string {
+	prefix := key + "="
+	for _, e := range envs {
+		if len(e) > len(prefix) && e[:len(prefix)] == prefix {
+			return e[len(prefix):]
+		}
+	}
+	return ""
 }
