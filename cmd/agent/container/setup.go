@@ -121,11 +121,7 @@ func (cmd *SetupContainerCmd) Run(ctx context.Context) error {
 		return err
 	}
 
-	if err := cmd.finalizeSetup(sctx); err != nil {
-		return err
-	}
-
-	return cmd.sendSetupResult(ctx, setupInfo, tunnelClient)
+	return cmd.finalizeSetup(sctx)
 }
 
 func (cmd *SetupContainerCmd) prepareWorkspace(sctx *setupContext) error {
@@ -186,15 +182,16 @@ func (cmd *SetupContainerCmd) prepareWorkspace(sctx *setupContext) error {
 }
 
 func (cmd *SetupContainerCmd) finalizeSetup(sctx *setupContext) error {
-	err := setup.SetupContainer(sctx.ctx, &setup.ContainerSetupConfig{
+	cfg := &setup.ContainerSetupConfig{
 		SetupInfo:         sctx.setupInfo,
 		ExtraWorkspaceEnv: sctx.workspaceInfo.CLIOptions.WorkspaceEnv,
 		ChownProjects:     cmd.ChownWorkspace,
 		PlatformOptions:   &sctx.workspaceInfo.CLIOptions.Platform,
 		TunnelClient:      sctx.tunnelClient,
 		Log:               sctx.logger,
-	})
-	if err != nil {
+	}
+
+	if err := setup.SetupContainerPreAttach(sctx.ctx, cfg); err != nil {
 		return err
 	}
 
@@ -202,7 +199,19 @@ func (cmd *SetupContainerCmd) finalizeSetup(sctx *setupContext) error {
 		return err
 	}
 
-	return cmd.startContainerDaemon(sctx.workspaceInfo, sctx.logger)
+	if err := cmd.startContainerDaemon(sctx.workspaceInfo, sctx.logger); err != nil {
+		return err
+	}
+
+	// Launch postAttachCommand as a detached background process before sending
+	// the result. Once sendSetupResult returns, the client tears down the SSH
+	// tunnel which kills this process, so postAttach must already be running
+	// independently.
+	if err := cmd.startPostAttachHooks(sctx); err != nil {
+		sctx.logger.Errorf("failed to start postAttachCommand: %v", err)
+	}
+
+	return cmd.sendSetupResult(sctx.ctx, sctx.setupInfo, sctx.tunnelClient)
 }
 
 func (cmd *SetupContainerCmd) initializeTunnelClient(
@@ -366,6 +375,30 @@ func (cmd *SetupContainerCmd) startContainerDaemon(
 			"daemon",
 			"--timeout",
 			workspaceInfo.ContainerTimeout,
+		), nil
+	})
+}
+
+func (cmd *SetupContainerCmd) startPostAttachHooks(sctx *setupContext) error {
+	if len(sctx.setupInfo.MergedConfig.PostAttachCommands) == 0 {
+		return nil
+	}
+
+	return command.StartBackgroundOnce("devpod.post-attach", func() (*exec.Cmd, error) {
+		sctx.logger.Debugf("starting postAttachCommand as background process")
+		binaryPath, err := os.Executable()
+		if err != nil {
+			return nil, err
+		}
+
+		//nolint:gosec // binaryPath is from os.Executable(), not user input
+		return exec.Command(
+			binaryPath,
+			"agent",
+			"container",
+			"post-attach",
+			"--setup-info",
+			cmd.SetupInfo,
 		), nil
 	})
 }

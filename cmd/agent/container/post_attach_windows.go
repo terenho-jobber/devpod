@@ -9,10 +9,10 @@ import (
 	"github.com/spf13/cobra"
 )
 
-func NewSetupContainerCmd(flags *flags.GlobalFlags) *cobra.Command {
+func NewPostAttachCmd(flags *flags.GlobalFlags) *cobra.Command {
 	return &cobra.Command{
-		Use:   "setup",
-		Short: "Sets up a container",
+		Use:   "post-attach",
+		Short: "Runs postAttachCommand lifecycle hooks",
 		Args:  cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, args []string) error {
 			return fmt.Errorf("Windows Containers are not supported")

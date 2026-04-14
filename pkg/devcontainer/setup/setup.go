@@ -38,7 +38,9 @@ type ContainerSetupConfig struct {
 	Log               log.Logger
 }
 
-func SetupContainer(ctx context.Context, cfg *ContainerSetupConfig) error {
+// SetupContainerPreAttach runs container setup up to and including postStartCommand.
+// After this returns, the workspace is ready for IDE access.
+func SetupContainerPreAttach(ctx context.Context, cfg *ContainerSetupConfig) error {
 	if err := validateContainerSetupConfig(cfg); err != nil {
 		return err
 	}
@@ -55,9 +57,21 @@ func SetupContainer(ctx context.Context, cfg *ContainerSetupConfig) error {
 
 	setupOptionalFeatures(ctx, cfg)
 
-	cfg.Log.Debugf("running lifecycle hooks")
-	if err := RunLifecycleHooks(ctx, cfg.SetupInfo, cfg.Log); err != nil {
-		return fmt.Errorf("lifecycle hooks: %w", err)
+	cfg.Log.Debugf("running pre-attach lifecycle hooks")
+	if err := RunPreAttachHooks(ctx, cfg.SetupInfo, cfg.Log); err != nil {
+		return fmt.Errorf("lifecycle hooks pre-attach: %w", err)
+	}
+
+	cfg.Log.Debugf("pre-attach setup completed")
+	return nil
+}
+
+// SetupContainerPostAttach runs postAttachCommand only.
+// Called after the IDE has been opened.
+func SetupContainerPostAttach(ctx context.Context, cfg *ContainerSetupConfig) error {
+	cfg.Log.Debugf("running post-attach lifecycle hooks")
+	if err := RunPostAttachHooks(ctx, cfg.SetupInfo, cfg.Log); err != nil {
+		return fmt.Errorf("lifecycle hooks post-attach: %w", err)
 	}
 
 	cfg.Log.Debugf("devcontainer setup completed")
