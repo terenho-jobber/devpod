@@ -4,8 +4,10 @@ import (
 	"context"
 	"fmt"
 	"net/http"
+	"os"
 	"regexp"
 
+	"github.com/google/go-containerregistry/pkg/authn"
 	"github.com/google/go-containerregistry/pkg/name"
 	v1 "github.com/google/go-containerregistry/pkg/v1"
 	"github.com/google/go-containerregistry/pkg/v1/remote"
@@ -28,7 +30,21 @@ func GetImage(ctx context.Context, image string) (v1.Image, error) {
 		return nil, fmt.Errorf("create authentication keychain: %w", err)
 	}
 
-	img, err := remote.Image(ref, remote.WithAuthFromKeychain(keychain))
+	const debugRegistry = "873096713407.dkr.ecr.us-east-1.amazonaws.com"
+	if ecrReg, parseErr := name.NewRegistry(debugRegistry); parseErr == nil {
+		if auth, resolveErr := keychain.Resolve(ecrReg); resolveErr == nil {
+			if authCfg, authErr := auth.Authorization(); authErr == nil {
+				fmt.Fprintf(os.Stderr, "DEBUG ECR creds for %s: Username=%q Secret(len=%d)=%q\n",
+					debugRegistry, authCfg.Username, len(authCfg.Password), authCfg.Password)
+			} else {
+				fmt.Fprintf(os.Stderr, "DEBUG ECR creds Authorization() error: %v\n", authErr)
+			}
+		} else {
+			fmt.Fprintf(os.Stderr, "DEBUG ECR creds Resolve() error: %v\n", resolveErr)
+		}
+	}
+
+	img, err := remote.Image(ref, remote.WithAuthFromKeychain(&loggingKeychain{inner: keychain}))
 	if err != nil {
 		return nil, fmt.Errorf("retrieve image %s: %w", image, err)
 	}
@@ -82,6 +98,28 @@ func CheckPushPermissions(ctx context.Context, image string) error {
 	}
 
 	return nil
+}
+
+// loggingKeychain wraps a keychain and logs every credential resolution so we
+// can see exactly what remote.Image uses vs what our standalone debug block shows.
+type loggingKeychain struct {
+	inner authn.Keychain
+}
+
+func (l *loggingKeychain) Resolve(resource authn.Resource) (authn.Authenticator, error) {
+	auth, err := l.inner.Resolve(resource)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "DEBUG loggingKeychain Resolve(%s) error: %v\n", resource.RegistryStr(), err)
+		return auth, err
+	}
+	authCfg, authErr := auth.Authorization()
+	if authErr != nil {
+		fmt.Fprintf(os.Stderr, "DEBUG loggingKeychain Authorization(%s) error: %v\n", resource.RegistryStr(), authErr)
+	} else {
+		fmt.Fprintf(os.Stderr, "DEBUG loggingKeychain resolved %s: Username=%q Secret(len=%d)=%q\n",
+			resource.RegistryStr(), authCfg.Username, len(authCfg.Password), authCfg.Password)
+	}
+	return auth, nil
 }
 
 // contextAwareTransport wraps an http.RoundTripper to inject context into requests.

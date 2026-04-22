@@ -9,6 +9,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strconv"
+	"strings"
 	"time"
 
 	"github.com/sirupsen/logrus"
@@ -689,6 +690,7 @@ func configureCredentials(cfg credentialsConfig) (string, string, error) {
 		return "", "", fmt.Errorf("workspace folder is not set")
 	}
 
+	cfg.log.Debugf("INJECT_DOCKER_CREDENTIALS runtime value: %q", cfg.workspaceInfo.Agent.InjectDockerCredentials)
 	dockerCredentials := ""
 	if cfg.workspaceInfo.Agent.InjectDockerCredentials == "true" {
 		dockerCredentials, err = dockercredentials.ConfigureCredentialsMachine(
@@ -698,6 +700,17 @@ func configureCredentials(cfg credentialsConfig) (string, string, error) {
 		)
 		if err != nil {
 			return "", "", err
+		}
+
+		// Debug: test the credential helper against the ECR registry.
+		helperPath := filepath.Join(dockerCredentials, "docker-credential-devpod")
+		testCmd := exec.CommandContext(cfg.ctx, helperPath, "get")
+		testCmd.Stdin = strings.NewReader("873096713407.dkr.ecr.us-east-1.amazonaws.com")
+		testOut, testErr := testCmd.CombinedOutput()
+		if testErr != nil {
+			cfg.log.Debugf("docker-credential-devpod get ECR test FAILED: %v\noutput: %s", testErr, string(testOut))
+		} else {
+			cfg.log.Debugf("docker-credential-devpod get ECR test OK:\n%s", string(testOut))
 		}
 	}
 
