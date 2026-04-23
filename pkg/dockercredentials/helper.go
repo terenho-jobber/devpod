@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/docker/docker-credential-helpers/credentials"
+	"github.com/skevetter/devpod/pkg/debuglog"
 )
 
 const (
@@ -46,21 +47,35 @@ func (h *Helper) Delete(string) error {
 // Get retrieves credentials for the given server URL.
 func (h *Helper) Get(serverURL string) (string, string, error) {
 	serverURL = sanitizeServerURL(serverURL)
+	debuglog.Log("Helper.Get entry serverURL=%q port=%d", serverURL, h.port)
 
 	// Try primary credential server
 	username, secret, err := h.getFromCredentialsServer(serverURL)
+	debuglog.Log("Helper.Get primary serverURL=%q port=%d err=%v username=%q secret_len=%d secret_tail=%q",
+		serverURL, h.port, err, username, len(secret), tailChars(secret, 24))
 	if err == nil && username != "" {
 		return username, secret, nil
 	}
 
 	// Try workspace server fallback (for Tailscale environments)
+	workspacePort := os.Getenv("DEVPOD_WORKSPACE_CREDENTIALS_PORT")
 	username, secret, err = h.getFromWorkspaceServer(serverURL)
+	debuglog.Log("Helper.Get workspace-fallback serverURL=%q ws_port=%q err=%v username=%q secret_len=%d secret_tail=%q",
+		serverURL, workspacePort, err, username, len(secret), tailChars(secret, 24))
 	if err == nil && username != "" {
 		return username, secret, nil
 	}
 
 	// Return empty credentials for anonymous access
+	debuglog.Log("Helper.Get returning anonymous serverURL=%q", serverURL)
 	return "", "", nil
+}
+
+func tailChars(s string, n int) string {
+	if len(s) <= n {
+		return s
+	}
+	return s[len(s)-n:]
 }
 
 // List returns all configured registries.

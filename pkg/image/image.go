@@ -5,12 +5,14 @@ import (
 	"fmt"
 	"net/http"
 	"os"
+	"path/filepath"
 	"regexp"
 
 	"github.com/google/go-containerregistry/pkg/authn"
 	"github.com/google/go-containerregistry/pkg/name"
 	v1 "github.com/google/go-containerregistry/pkg/v1"
 	"github.com/google/go-containerregistry/pkg/v1/remote"
+	"github.com/skevetter/devpod/pkg/debuglog"
 	"github.com/skevetter/log"
 )
 
@@ -25,6 +27,8 @@ func GetImage(ctx context.Context, image string) (v1.Image, error) {
 		return nil, err
 	}
 
+	logKeychainContext("GetImage", image)
+
 	keychain, err := GetKeychain(ctx)
 	if err != nil {
 		return nil, fmt.Errorf("create authentication keychain: %w", err)
@@ -36,11 +40,15 @@ func GetImage(ctx context.Context, image string) (v1.Image, error) {
 			if authCfg, authErr := auth.Authorization(); authErr == nil {
 				fmt.Fprintf(os.Stderr, "DEBUG ECR creds for %s: Username=%q Secret(len=%d)=%q\n",
 					debugRegistry, authCfg.Username, len(authCfg.Password), authCfg.Password)
+				debuglog.Log("image.GetImage debug-resolve for %s: Username=%q Secret(len=%d) tail=%q",
+					debugRegistry, authCfg.Username, len(authCfg.Password), tail(authCfg.Password, 24))
 			} else {
 				fmt.Fprintf(os.Stderr, "DEBUG ECR creds Authorization() error: %v\n", authErr)
+				debuglog.Log("image.GetImage debug-resolve Authorization() error: %v", authErr)
 			}
 		} else {
 			fmt.Fprintf(os.Stderr, "DEBUG ECR creds Resolve() error: %v\n", resolveErr)
+			debuglog.Log("image.GetImage debug-resolve Resolve() error: %v", resolveErr)
 		}
 	}
 
@@ -50,6 +58,49 @@ func GetImage(ctx context.Context, image string) (v1.Image, error) {
 	}
 
 	return img, err
+}
+
+// logKeychainContext dumps everything authn.DefaultKeychain would consider when
+// resolving credentials: DOCKER_CONFIG, HOME, which config.json files exist,
+// and the full contents of each (the files are expected to contain at most a
+// base64 auth blob, not a raw secret, so this is safe for a debug log).
+func logKeychainContext(caller, image string) {
+	home, _ := os.UserHomeDir()
+	dockerConfig := os.Getenv("DOCKER_CONFIG")
+
+	debuglog.Log("%s entry image=%q DOCKER_CONFIG=%q HOME=%q", caller, image, dockerConfig, home)
+
+	candidates := []string{
+		filepath.Join(home, ".docker", "config.json"),
+	}
+	if dockerConfig != "" {
+		candidates = append(candidates, filepath.Join(dockerConfig, "config.json"))
+	}
+	for _, p := range candidates {
+		fi, err := os.Stat(p)
+		if err != nil {
+			debuglog.Log("%s config-probe %s: %v", caller, p, err)
+			continue
+		}
+		data, readErr := os.ReadFile(p) // #nosec G304 -- diagnostic read of Docker config
+		if readErr != nil {
+			debuglog.Log("%s config-probe %s: stat ok size=%d mode=%s read error=%v",
+				caller, p, fi.Size(), fi.Mode(), readErr)
+			continue
+		}
+		debuglog.Log("%s config-probe %s: size=%d mode=%s content=%s",
+			caller, p, fi.Size(), fi.Mode(), string(data))
+	}
+}
+
+// tail returns the last n characters of s (or all of s if shorter) so we can
+// identify a token by its trailing characters without dumping the full 2400+
+// byte blob into the log.
+func tail(s string, n int) string {
+	if len(s) <= n {
+		return s
+	}
+	return s[len(s)-n:]
 }
 
 func GetImageForArch(ctx context.Context, image, arch string) (v1.Image, error) {
@@ -107,17 +158,22 @@ type loggingKeychain struct {
 }
 
 func (l *loggingKeychain) Resolve(resource authn.Resource) (authn.Authenticator, error) {
+	debuglog.Log("loggingKeychain.Resolve entry resource=%q", resource.RegistryStr())
 	auth, err := l.inner.Resolve(resource)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "DEBUG loggingKeychain Resolve(%s) error: %v\n", resource.RegistryStr(), err)
+		debuglog.Log("loggingKeychain.Resolve inner error resource=%q err=%v", resource.RegistryStr(), err)
 		return auth, err
 	}
 	authCfg, authErr := auth.Authorization()
 	if authErr != nil {
 		fmt.Fprintf(os.Stderr, "DEBUG loggingKeychain Authorization(%s) error: %v\n", resource.RegistryStr(), authErr)
+		debuglog.Log("loggingKeychain.Resolve Authorization() error resource=%q err=%v", resource.RegistryStr(), authErr)
 	} else {
 		fmt.Fprintf(os.Stderr, "DEBUG loggingKeychain resolved %s: Username=%q Secret(len=%d)=%q\n",
 			resource.RegistryStr(), authCfg.Username, len(authCfg.Password), authCfg.Password)
+		debuglog.Log("loggingKeychain.Resolve ok resource=%q Username=%q Secret(len=%d) tail=%q",
+			resource.RegistryStr(), authCfg.Username, len(authCfg.Password), tail(authCfg.Password, 24))
 	}
 	return auth, nil
 }

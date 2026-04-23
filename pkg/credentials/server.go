@@ -12,6 +12,7 @@ import (
 
 	"github.com/sirupsen/logrus"
 	"github.com/skevetter/devpod/pkg/agent/tunnel"
+	"github.com/skevetter/devpod/pkg/debuglog"
 	"github.com/skevetter/log"
 )
 
@@ -103,22 +104,36 @@ func handleDockerCredentialsRequest(
 ) error {
 	out, err := io.ReadAll(request.Body)
 	if err != nil {
+		debuglog.Log("credentials-server read-body error remote=%q err=%v", request.RemoteAddr, err)
 		return fmt.Errorf("read request body: %w", err)
 	}
 
+	debuglog.Log("credentials-server received docker-credentials POST remote=%q body=%q",
+		request.RemoteAddr, string(out))
 	log.WithFields(logrus.Fields{"data": string(out)}).
 		Debug("received docker credentials post data")
 	response, err := client.DockerCredentials(ctx, &tunnel.Message{Message: string(out)})
 	if err != nil {
+		debuglog.Log("credentials-server tunnel DockerCredentials error body=%q err=%v",
+			string(out), err)
 		return fmt.Errorf("get docker credentials response: %w", err)
 	}
 
 	writer.Header().Set("Content-Type", "application/json")
 	writer.WriteHeader(http.StatusOK)
 	_, _ = writer.Write([]byte(response.Message))
+	debuglog.Log("credentials-server wrote response bytes=%d tail=%q",
+		len(response.Message), tailChars(response.Message, 80))
 	log.WithFields(logrus.Fields{"bytes": len(response.Message)}).
 		Debug("wrote docker credentials response")
 	return nil
+}
+
+func tailChars(s string, n int) string {
+	if len(s) <= n {
+		return s
+	}
+	return s[len(s)-n:]
 }
 
 func handleGitCredentialsRequest(
