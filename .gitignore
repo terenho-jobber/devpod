@@ -13,3 +13,6 @@
 /tagsvendor/
 node_modules/
 desktop/src-tauri/gen/schemas
+devpod-darwin-arm64
+devpod-linux-arm64
+tmp/
