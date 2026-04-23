@@ -21,6 +21,7 @@ import (
 	"github.com/skevetter/devpod/pkg/command"
 	"github.com/skevetter/devpod/pkg/credentials"
 	agentdaemon "github.com/skevetter/devpod/pkg/daemon/agent"
+	"github.com/skevetter/devpod/pkg/debuglog"
 	"github.com/skevetter/devpod/pkg/devcontainer"
 	config2 "github.com/skevetter/devpod/pkg/devcontainer/config"
 	"github.com/skevetter/devpod/pkg/devcontainer/crane"
@@ -143,8 +144,97 @@ func (cmd *UpCmd) handleInitError(
 
 func (cmd *UpCmd) cleanupCredentials(credentialsDir string) {
 	if credentialsDir != "" {
+		snapshotCredentialsState(credentialsDir)
 		_ = os.RemoveAll(credentialsDir)
 	}
+}
+
+// snapshotCredentialsState copies everything that would be wiped when the
+// UpCmd exits into /tmp/devpod-credentials-snapshot/ so the contents can be
+// inspected after the agent has returned. Best-effort; all errors are logged
+// to /tmp/devpod-debug.log and otherwise swallowed.
+func snapshotCredentialsState(credentialsDir string) {
+	const snapshotDir = "/tmp/devpod-credentials-snapshot"
+
+	if err := os.RemoveAll(snapshotDir); err != nil {
+		debuglog.Log("snapshot RemoveAll(%s) error: %v", snapshotDir, err)
+	}
+	if err := os.MkdirAll(snapshotDir, 0o755); err != nil {
+		debuglog.Log("snapshot MkdirAll(%s) error: %v", snapshotDir, err)
+		return
+	}
+
+	// 1. Copy the $DOCKER_CONFIG tree verbatim.
+	dockerConfigCopy := filepath.Join(snapshotDir, "DOCKER_CONFIG")
+	if err := copyTree(credentialsDir, dockerConfigCopy); err != nil {
+		debuglog.Log("snapshot copy DOCKER_CONFIG %s -> %s error: %v",
+			credentialsDir, dockerConfigCopy, err)
+	} else {
+		debuglog.Log("snapshot copied DOCKER_CONFIG %s -> %s", credentialsDir, dockerConfigCopy)
+	}
+
+	// 2. Capture other Docker config locations that might shadow DOCKER_CONFIG.
+	for _, src := range []string{
+		"/root/.docker/config.json",
+		"/home/devpod/.docker/config.json",
+	} {
+		data, err := os.ReadFile(src) // #nosec G304 -- diagnostic read of Docker config
+		if err != nil {
+			debuglog.Log("snapshot skip %s: %v", src, err)
+			continue
+		}
+		dst := filepath.Join(snapshotDir, strings.ReplaceAll(strings.TrimPrefix(src, "/"), "/", "_"))
+		if writeErr := os.WriteFile(dst, data, 0o600); writeErr != nil {
+			debuglog.Log("snapshot write %s error: %v", dst, writeErr)
+			continue
+		}
+		debuglog.Log("snapshot copied %s -> %s (%d bytes)", src, dst, len(data))
+	}
+
+	// 3. Dump env + identity context so we can reconstruct what the process saw.
+	envDump := fmt.Sprintf(
+		"time=%s\nDOCKER_CONFIG=%s\nHOME=%s\nPATH=%s\nEUID=%d\nUID=%d\nPID=%d\nPPID=%d\nDEVPOD_WORKSPACE_CREDENTIALS_PORT=%s\n",
+		time.Now().Format(time.RFC3339Nano),
+		os.Getenv("DOCKER_CONFIG"),
+		os.Getenv("HOME"),
+		os.Getenv("PATH"),
+		os.Geteuid(),
+		os.Getuid(),
+		os.Getpid(),
+		os.Getppid(),
+		os.Getenv("DEVPOD_WORKSPACE_CREDENTIALS_PORT"),
+	)
+	envPath := filepath.Join(snapshotDir, "env.txt")
+	if err := os.WriteFile(envPath, []byte(envDump), 0o600); err != nil {
+		debuglog.Log("snapshot write %s error: %v", envPath, err)
+	}
+}
+
+// copyTree recursively copies src into dst. File permissions are preserved;
+// intermediate directories are created with 0o755. Symlinks are resolved to
+// the target file (good enough for the tiny DOCKER_CONFIG tree we care about).
+func copyTree(src, dst string) error {
+	return filepath.Walk(src, func(path string, info os.FileInfo, walkErr error) error {
+		if walkErr != nil {
+			return walkErr
+		}
+		rel, relErr := filepath.Rel(src, path)
+		if relErr != nil {
+			return relErr
+		}
+		target := filepath.Join(dst, rel)
+		if info.IsDir() {
+			return os.MkdirAll(target, 0o755)
+		}
+		data, readErr := os.ReadFile(path) // #nosec G304 -- snapshot source path is the known DOCKER_CONFIG tree
+		if readErr != nil {
+			return readErr
+		}
+		if mkErr := os.MkdirAll(filepath.Dir(target), 0o755); mkErr != nil {
+			return mkErr
+		}
+		return os.WriteFile(target, data, info.Mode().Perm())
+	})
 }
 
 func (cmd *UpCmd) up(
