@@ -27,7 +27,7 @@ func NewTunnelLogger(ctx context.Context, client tunnel.TunnelClient, debug bool
 		ctx:     ctx,
 		client:  client,
 		level:   level,
-		logChan: make(chan logEntry, 1000), // Buffer size of 1000 messages
+		logChan: make(chan *tunnel.LogMessage, 1000), // Buffer size of 1000 messages
 	}
 
 	go logger.worker()
@@ -35,65 +35,25 @@ func NewTunnelLogger(ctx context.Context, client tunnel.TunnelClient, debug bool
 	return logger
 }
 
-// Flusher is implemented by loggers that buffer output and can block until
-// everything queued so far has been delivered. NewTunnelLogger returns a value
-// satisfying this interface.
-type Flusher interface {
-	Flush()
-}
-
-var _ Flusher = (*tunnelLogger)(nil)
-
-// logEntry is what flows through the logger channel. It is either a log
-// message to forward over the tunnel, or a flush request whose ack channel is
-// closed once all preceding messages have been sent.
-type logEntry struct {
-	msg   *tunnel.LogMessage
-	flush chan struct{}
-}
-
 type tunnelLogger struct {
 	ctx     context.Context
 	level   logrus.Level
 	client  tunnel.TunnelClient
-	logChan chan logEntry
+	logChan chan *tunnel.LogMessage
 	fields  logrus.Fields
 }
 
 func (s *tunnelLogger) worker() {
 	for {
 		select {
-		case entry := <-s.logChan:
-			s.handle(entry)
+		case msg := <-s.logChan:
+			ctx, cancel := context.WithTimeout(s.ctx, 5*time.Second)
+			_, _ = s.client.Log(ctx, msg)
+			// ignore error since we can't use the logger itself
+			cancel()
 		case <-s.ctx.Done():
-			// Best-effort drain so the final lines aren't lost when the
-			// agent shuts down before the channel has been emptied.
-			for {
-				select {
-				case entry := <-s.logChan:
-					s.handle(entry)
-				default:
-					return
-				}
-			}
+			return
 		}
-	}
-}
-
-// Flush blocks until all messages queued before the call have been forwarded
-// over the tunnel. It must be called before the process exits (and before
-// s.ctx is cancelled) to guarantee the final log lines are delivered.
-func (s *tunnelLogger) Flush() {
-	ack := make(chan struct{})
-	select {
-	case s.logChan <- logEntry{flush: ack}:
-	case <-s.ctx.Done():
-		return
-	}
-
-	select {
-	case <-ack:
-	case <-s.ctx.Done():
 	}
 }
 
@@ -115,7 +75,10 @@ func (s *tunnelLogger) Debug(args ...any) {
 		return
 	}
 
-	s.enqueue(tunnel.LogLevel_DEBUG, fmt.Sprintln(args...))
+	s.logChan <- &tunnel.LogMessage{
+		LogLevel: tunnel.LogLevel_DEBUG,
+		Message:  s.formatMessage(fmt.Sprintln(args...)),
+	}
 }
 
 func (s *tunnelLogger) Debugf(format string, args ...any) {
@@ -123,7 +86,10 @@ func (s *tunnelLogger) Debugf(format string, args ...any) {
 		return
 	}
 
-	s.enqueue(tunnel.LogLevel_DEBUG, fmt.Sprintf(format, args...)+"\n")
+	s.logChan <- &tunnel.LogMessage{
+		LogLevel: tunnel.LogLevel_DEBUG,
+		Message:  s.formatMessage(fmt.Sprintf(format, args...) + "\n"),
+	}
 }
 
 func (s *tunnelLogger) Info(args ...any) {
@@ -131,7 +97,10 @@ func (s *tunnelLogger) Info(args ...any) {
 		return
 	}
 
-	s.enqueue(tunnel.LogLevel_INFO, fmt.Sprintln(args...))
+	s.logChan <- &tunnel.LogMessage{
+		LogLevel: tunnel.LogLevel_INFO,
+		Message:  s.formatMessage(fmt.Sprintln(args...)),
+	}
 }
 
 func (s *tunnelLogger) Infof(format string, args ...any) {
@@ -139,7 +108,10 @@ func (s *tunnelLogger) Infof(format string, args ...any) {
 		return
 	}
 
-	s.enqueue(tunnel.LogLevel_INFO, fmt.Sprintf(format, args...)+"\n")
+	s.logChan <- &tunnel.LogMessage{
+		LogLevel: tunnel.LogLevel_INFO,
+		Message:  s.formatMessage(fmt.Sprintf(format, args...) + "\n"),
+	}
 }
 
 func (s *tunnelLogger) Warn(args ...any) {
@@ -147,7 +119,10 @@ func (s *tunnelLogger) Warn(args ...any) {
 		return
 	}
 
-	s.enqueue(tunnel.LogLevel_WARNING, fmt.Sprintln(args...))
+	s.logChan <- &tunnel.LogMessage{
+		LogLevel: tunnel.LogLevel_WARNING,
+		Message:  s.formatMessage(fmt.Sprintln(args...)),
+	}
 }
 
 func (s *tunnelLogger) Warnf(format string, args ...any) {
@@ -155,7 +130,10 @@ func (s *tunnelLogger) Warnf(format string, args ...any) {
 		return
 	}
 
-	s.enqueue(tunnel.LogLevel_WARNING, fmt.Sprintf(format, args...)+"\n")
+	s.logChan <- &tunnel.LogMessage{
+		LogLevel: tunnel.LogLevel_WARNING,
+		Message:  s.formatMessage(fmt.Sprintf(format, args...) + "\n"),
+	}
 }
 
 func (s *tunnelLogger) Error(args ...any) {
@@ -163,7 +141,10 @@ func (s *tunnelLogger) Error(args ...any) {
 		return
 	}
 
-	s.enqueue(tunnel.LogLevel_ERROR, fmt.Sprintln(args...))
+	s.logChan <- &tunnel.LogMessage{
+		LogLevel: tunnel.LogLevel_ERROR,
+		Message:  s.formatMessage(fmt.Sprintln(args...)),
+	}
 }
 
 func (s *tunnelLogger) Errorf(format string, args ...any) {
@@ -171,7 +152,10 @@ func (s *tunnelLogger) Errorf(format string, args ...any) {
 		return
 	}
 
-	s.enqueue(tunnel.LogLevel_ERROR, fmt.Sprintf(format, args...)+"\n")
+	s.logChan <- &tunnel.LogMessage{
+		LogLevel: tunnel.LogLevel_ERROR,
+		Message:  s.formatMessage(fmt.Sprintf(format, args...) + "\n"),
+	}
 }
 
 func (s *tunnelLogger) Fatal(args ...any) {
@@ -179,10 +163,11 @@ func (s *tunnelLogger) Fatal(args ...any) {
 		return
 	}
 
-	s.enqueue(tunnel.LogLevel_ERROR, fmt.Sprintln(args...))
+	s.logChan <- &tunnel.LogMessage{
+		LogLevel: tunnel.LogLevel_ERROR,
+		Message:  s.formatMessage(fmt.Sprintln(args...)),
+	}
 
-	// make sure the message is delivered before we exit
-	s.Flush()
 	os.Exit(1)
 }
 
@@ -191,10 +176,11 @@ func (s *tunnelLogger) Fatalf(format string, args ...any) {
 		return
 	}
 
-	s.enqueue(tunnel.LogLevel_ERROR, fmt.Sprintf(format, args...)+"\n")
+	s.logChan <- &tunnel.LogMessage{
+		LogLevel: tunnel.LogLevel_ERROR,
+		Message:  s.formatMessage(fmt.Sprintf(format, args...) + "\n"),
+	}
 
-	// make sure the message is delivered before we exit
-	s.Flush()
 	os.Exit(1)
 }
 
@@ -203,7 +189,10 @@ func (s *tunnelLogger) Done(args ...any) {
 		return
 	}
 
-	s.enqueue(tunnel.LogLevel_DONE, fmt.Sprintln(args...))
+	s.logChan <- &tunnel.LogMessage{
+		LogLevel: tunnel.LogLevel_DONE,
+		Message:  s.formatMessage(fmt.Sprintln(args...)),
+	}
 }
 
 func (s *tunnelLogger) Donef(format string, args ...any) {
@@ -211,7 +200,10 @@ func (s *tunnelLogger) Donef(format string, args ...any) {
 		return
 	}
 
-	s.enqueue(tunnel.LogLevel_DONE, fmt.Sprintf(format, args...)+"\n")
+	s.logChan <- &tunnel.LogMessage{
+		LogLevel: tunnel.LogLevel_DONE,
+		Message:  s.formatMessage(fmt.Sprintf(format, args...) + "\n"),
+	}
 }
 
 func (s *tunnelLogger) Print(level logrus.Level, args ...any) {
@@ -322,28 +314,4 @@ func (s *tunnelLogger) WithFields(fields logrus.Fields) log.Logger {
 
 func (*tunnelLogger) LogrLogSink() logr.LogSink {
 	return nil
-}
-
-// enqueue formats and queues a message for the worker to forward.
-func (s *tunnelLogger) enqueue(level tunnel.LogLevel, message string) {
-	s.logChan <- logEntry{msg: &tunnel.LogMessage{
-		LogLevel: level,
-		Message:  s.formatMessage(message),
-	}}
-}
-
-// handle forwards a single message over the tunnel, or acknowledges a flush
-// request. Sends use a context detached from s.ctx's cancellation so that
-// queued messages can still be delivered during shutdown as long as the
-// underlying connection is alive.
-func (s *tunnelLogger) handle(entry logEntry) {
-	if entry.flush != nil {
-		close(entry.flush)
-		return
-	}
-
-	ctx, cancel := context.WithTimeout(context.WithoutCancel(s.ctx), 5*time.Second)
-	_, _ = s.client.Log(ctx, entry.msg)
-	// ignore error since we can't use the logger itself
-	cancel()
 }
